@@ -142,7 +142,7 @@ class UserLoginLogoutTests(TestCase):
         response = self.client.get(self.dashboard_url)
         # Should redirect to login page
         self.assertEqual(response.status_code, 302)
-        self.assertTrue(response.url.startswith("/accounts/login/"))
+        self.assertTrue(response.url.startswith("/accounts/login/"))  # type: ignore
 
 
 class NoteCreationTests(TestCase):
