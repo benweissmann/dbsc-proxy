@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>My Note</title>
+</head>
+<body>
+    <h1>Welcome, {{ user.username }}!</h1>
+
+    <nav>
+        <a href="{% url 'logout' %}">Log Out</a>
+    </nav>
+
+    <h2>Your Note</h2>
+    <form method="post">
+        {% csrf_token %}
+        <p>
+            <label for="note_text">Note Text:</label><br>
+            <textarea id="note_text" name="note_text" rows="10" cols="50">{{ note.note_text }}</textarea>
+        </p>
+        <button type="submit">Save Note</button>
+    </form>
+
+    <p><small>Last updated: {{ note.updated_at }}</small></p>
+</body>
+</html>
