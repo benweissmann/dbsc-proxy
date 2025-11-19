@@ -31,7 +31,7 @@ sequenceDiagram
 
 Probably don't, for now! DBSC is still a W3C draft. It's only available when
 you turn on a flag in Chrome, or opt-in to an Origin Trial.
-[Learn moreabout trying the beta implementation of DBSC](https://github.com/w3c/webappsec-dbsc/wiki/Testing-early-versions-of-DBSC).
+[Learn more about trying the beta implementation of DBSC](https://github.com/w3c/webappsec-dbsc/wiki/Testing-early-versions-of-DBSC).
 
 ## How to try it
 
@@ -65,74 +65,20 @@ Configuration is done via environment variables:
   if the cookie does specify a domain.
 
 - `DBSC_PROXY_REFRESH_INTERVAL`: How long the short-lived DBSC session cookie
-  should last before the browser has to refresh it by proving posession of the
+  should last before the browser has to refresh it by proving possession of the
   bound session's private key. Defaults to `15m` (15 minutes). This is
   a string in any format supported by Go's [ParseDuration](https://pkg.go.dev/time#ParseDuration).
 
+The proxy will add a `Dbsc-Proxy-Public-Key` header to requests it sends to
+the upstream server for clients that have registered a DBSC session and are
+using the short-lived, device-bound session cookie. you may want to store or
+log this header in your application code. You could also use it to display in
+your app which sessions are using DBSC, or block requests without a
+`Dbsc-Proxy-Public-Key` header within sessions that previously did have
+that header (which could indicate a downgrade attack, or an attacker who
+stole the long-lived session cookie during authentication).
 
-## Avoiding Downgrade Attacks
-
-DBSC in general is suceptible to downgrade attacks. Because we provide the
-long-lived cookie initially to the client (so that if the client doesn't
-support DBSC, and doesn't know how to complete the device binding step and
-get a short-lived, refreshable, device-bound cookie, it can still use your
-app with the long-lived cookie), malware on the user's device could intercept
-that long-lived cookie during login and then use it, even if the browser
-supports DBSC and exchanges its long-lived cookie for a short-lived cookie.
-
-To avoid this, it's important that your app stops accepting the long-lived
-cookie after the user starts using a short-lived device-bound cookie. This makes
-a downgrade much harder: the malware would need to both intercept the long-lived
-cookie, and also interrupt DBSC session initialization so the browser does not
-complete the exchange for a short-lived cookie. While this is certainly possible,
-it's more complex and more detectible than a read-only attack to steal the
-long-lived cookie.
-
-If you don't implement this protection, you're still in better shape than
-without DBSC: the malware must steal the long-lived cookie, which is only stored by the browser during the very
-short window between initial login and DBSC session initialization. But
-preventing use of the long-lived session cookie after DBSC session initialization
-provides even better protection.
-
-To implement this protection, your app should examine the `Dbsc-Proxy-Public-Key`
-header of requests. This will be set by the on any request where it receives
-a short-lived cookie and swaps it out for a long-lived cookie when sending
-the request upstream to your app. If you see this header, you should store the
-public key in the user's session data. For future requests, if the public
-key changes or is absent, reject the request.
-
-Here's an example of how you'd implement this in Node.JS/Express:
-
-<details>
-
-<summary>Node.JS / Express Code Sample</summary>
-
-```javascript
-app.use(function(req, res, next) {
-  const reqPubKey = req.get('dbsc-proxy-public-key') || null;
-  const sessPubKey = req.session.dbscPubKey || null;
-
-  if (sessPubKey && (sessPubKey != reqPubKey)) {
-    // Request public key does not match the one for this session -- this
-    // might be a downgrade attack.
-    res.status(403).end();
-    return;
-  }
-
-  if (reqPubKey && !sessPubKey) {
-    // This session completed registration and is now device-bound
-    req.session.dbscPubKey = reqPubKey;
-  }
-
-  next();
-})
-```
-
-</details>
-
-For an example of how you'd implement it in Django, see TODO.
-
-## Techical Design
+## Technical Design
 
 Feedback is welcome on this design! Please open an issue if you have any concerns
 or suggestions with the design of the proxy.
@@ -150,9 +96,9 @@ The DBSC proxy uses 3 persistent values stored by the client:
 
   - A cookie called `dbsc_proxy_upstream`. This holds the value `aead({ upstream_session, pubkey })` and has an expiration (and all other attributes) equal to the upstream session cookie's. Conceptually, this cookie is serving as the server's storage that a particular keypair is bound to a particular session, but using an authenticated/encrypted cookie to have the client handle persistence instead of the server.
 
-  - The session cookie (with a name matching the upstream application's session cookie, as configued by `DBSC_PROXY_COOKIE_NAME`). This holds the value `dbsc_proxy::timestamp;hmac(timestamp;<dbsc_proxy_upstream cookie value>)`, i.e., a timestamp and a signature of that timestamp together with the value of dbsc_proxy_upstream. It has an expiration of `DBSC_PROXY_REFRESH_INTERVAL`, and otherwise has all the same attributes as the upstream cookie. Conceptually, this cookie is a token that provides a short-lived authorization for the client to make use of the session in the `dbsc_proxy_upstream` cookie without re-proving possession of the private key.
+  - The session cookie (with a name matching the upstream application's session cookie, as configured by `DBSC_PROXY_COOKIE_NAME`). This holds the value `dbsc_proxy::timestamp;hmac(timestamp;<dbsc_proxy_upstream cookie value>)`, i.e., a timestamp and a signature of that timestamp together with the value of dbsc_proxy_upstream. It has an expiration of `DBSC_PROXY_REFRESH_INTERVAL`, and otherwise has all the same attributes as the upstream cookie. Conceptually, this cookie is a token that provides a short-lived authorization for the client to make use of the session in the `dbsc_proxy_upstream` cookie without re-proving possession of the private key.
 
-### Session initialization
+### Session registration
 
 When the proxy returns a response that contains the header `Set-Cookie: session=upstream_session`:
 - If the cookie is empty or the expiration is in the past:
