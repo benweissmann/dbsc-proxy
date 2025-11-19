@@ -58,7 +58,7 @@ Configuration is done via environment variables:
   uses separate cookies for session data and a signature, you should specify the
   name of the signature cookie, since that's the important cookie to protect.
 
-- `DBSC_PROXY_SCOPE`: A JSON-encoded [DBSC Scope Specification](https://w3c.github.io/webappsec-dbsc/#format-session-instructions).
+- `DBSC_PROXY_SCOPE`: A JSON-encoded [DBSC Scope](https://w3c.github.io/webappsec-dbsc/#format-session-instructions).
   If this is not provided, the proxy will use `{ "include_site": false }` if the
   upstream's `Set-Cookie` does not specify a domain (i.e., if the cookie
   is origin-scoped rather than being valid for subdomains), and `{ "include_site": true }`
