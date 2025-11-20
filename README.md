@@ -43,11 +43,19 @@ you turn on a flag in Chrome, or opt-in to an Origin Trial.
 
 3. Run the proxy: `DBSC_PROXY_SECRET=sosecret go run cmd/proxy`
 
-
-
 ## Configuration
 
 Configuration is done via environment variables:
+
+- `DBSC_PROXY_LISTEN`: The port/interface to listen on. Defaults to
+`0.0.0.0:8000`. Make sure to change this to `127.0.0.1:<port>` if you don't
+want to proxy to accept external traffic.
+
+- `DBSC_PROXY_UPSTREAM`: The URL of the upstream service to send requests to.
+Required. Must be an `http` or `https` URL. May not contain a path, query
+parameters, or username/password (i.e., must consist only of `http` or `https`
+protocol, a hostname or IP, and optional port). If you provide an `https://`
+URL, the certificate will be validated.
 
 - `DBSC_PROXY_SECRET`: A secret used for signing and encryption. Required.
 
@@ -58,7 +66,7 @@ Configuration is done via environment variables:
   uses separate cookies for session data and a signature, you should specify the
   name of the signature cookie, since that's the important cookie to protect.
 
-- `DBSC_PROXY_SCOPE`: A JSON-encoded [DBSC Scope Specification](https://w3c.github.io/webappsec-dbsc/#format-session-instructions).
+- `DBSC_PROXY_SCOPE`: A JSON-encoded [DBSC Scope](https://w3c.github.io/webappsec-dbsc/#format-session-instructions).
   If this is not provided, the proxy will use `{ "include_site": false }` if the
   upstream's `Set-Cookie` does not specify a domain (i.e., if the cookie
   is origin-scoped rather than being valid for subdomains), and `{ "include_site": true }`
@@ -69,6 +77,26 @@ Configuration is done via environment variables:
   bound session's private key. Defaults to `15m` (15 minutes). This is
   a string in any format supported by Go's [ParseDuration](https://pkg.go.dev/time#ParseDuration).
 
+- `DBSC_PROXY_SET_X_FORWARDED`: Whether to replace the request's X-Forwarded
+  headers with new values based on the request to DBSC proxy.
+
+  If true, DBSC proxy will:
+  - Remove the  `Forwarded`, `X-Forwarded-Host`, and `X-Forwarded-Proto`
+    headers from the  client request
+  - Add its own `X-Forwarded-Host` and `X-Forwarded-Proto` headers with the
+    `Host` header value and connection protocol of the request as it arrived
+  - If `X-Forwarded-For` is present on the request, the client IP is appended
+    to the end of the value, otherwise a new `X-Forwarded-For` header is added
+    with the client IP.
+
+  Otherwise (by default), DBSC proxy will not make any changes to these headers.
+
+- `DBSC_PROXY_REWRITE_HOST`: By default, DBSC Proxy does not rewrite the `Host`
+  header of the request. If you want it to do so, set this environment variable
+  to `true` to rewrite the `Host` header to the hostname from `DBSC_PROXY_UPSTREAM`.
+
+## HTTP Headers
+
 The proxy will add a `Dbsc-Proxy-Public-Key` header to requests it sends to
 the upstream server for clients that have registered a DBSC session and are
 using the short-lived, device-bound session cookie. you may want to store or
@@ -77,6 +105,17 @@ your app which sessions are using DBSC, or block requests without a
 `Dbsc-Proxy-Public-Key` header within sessions that previously did have
 that header (which could indicate a downgrade attack, or an attacker who
 stole the long-lived session cookie during authentication).
+
+By default, DBSC does not change the `X-Forwarded-*` or `Host` headers of
+incoming requests. You can use the `DBSC_PROXY_SET_X_FORWARDED` and
+`DBSC_PROXY_REWRITE_HOST` environment variables to adjust the behavior. The
+recommended topology for DBSC Proxy is to run it right next to your application
+server -- so behind whatever load-balancer or reverse-proxy is handling TLS
+termination, right next to your application (for example, you might run it on
+each of your application servers, or as a sidecar in a Kubernetes pod). So by
+default, we do not adjust any headers since we assume we're behind a TLS
+terminaton layer and the headers have already been set to match what the
+application expects to receive.
 
 ## Technical Design
 
