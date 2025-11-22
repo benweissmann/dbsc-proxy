@@ -143,7 +143,7 @@ The DBSC proxy uses 3 persistent values stored by the client:
 
   - A cookie called `dbsc_proxy`. This holds the value `aead({ upstream_session, pubkey })` and has an expiration (and all other attributes) equal to the upstream session cookie's. Conceptually, this cookie is serving as the server's storage that a particular keypair is bound to a particular session, but using an authenticated/encrypted cookie to have the client handle persistence instead of the server.
 
-  - The session cookie (with a name matching the upstream application's session cookie, as configured by `DBSC_PROXY_COOKIE_NAME`). This holds the value `dbsc_proxy:timestamp:hmac(timestamp:<dbsc_proxy cookie value>)`, i.e., a timestamp and a signature of that timestamp together with the value of dbsc_proxy. It has an expiration of `DBSC_PROXY_REFRESH_INTERVAL`, and otherwise has all the same attributes as the upstream cookie. Conceptually, this cookie is a token that provides a short-lived authorization for the client to make use of the session in the `dbsc_proxy` cookie without re-proving possession of the private key.
+  - The session cookie (with a name matching the upstream application's session cookie, as configured by `DBSC_PROXY_COOKIE_NAME`). This holds the value `dbsc_proxy:<timestamp>:hmac(<timestamp>:<dbsc_proxy cookie value>)`, i.e., a timestamp and a signature of that timestamp together with the value of the `dbsc_proxy` cookie. It has an expiration of `DBSC_PROXY_REFRESH_INTERVAL`, and otherwise has all the same attributes as the upstream cookie. Conceptually, this cookie is a token that provides a short-lived authorization for the client to make use of the session in the `dbsc_proxy` cookie without re-proving possession of the private key.
 
 ### Session registration
 
@@ -155,20 +155,20 @@ When the proxy returns a response that contains the header `Set-Cookie: session=
   - Add a `Secure-Session-Registration` header with challenge `timestamp:hmac(timestamp)` and path `/dbsc_proxy/StartSession`. We support only the `ES256` algorithm since the public keys are shorter.
   - Leave the `Set-Cookie` as-is to support browsers that doesn't support DBSC
   - We set the `authorization` field of Secure-Session-Registration to `aead(upstream_session)`. We do this instead of relying on the client storing the long-lived cookie as instructed by the passed-through Set-Cookie, so that we
-  can access the cookie attributes later during session registration.
+  can access the cookie attributes later during session registration (otherwise, we'd only get the cookie value -- cookies passed from client to server do not include attributes)
 
 The proxy intercepts requests to the `/dbsc_proxy/StartSession` endpoint, and:
 
 - Checks that the provided challenge matches the format `timestamp:hmac(timestamp)` with a valid HMAC and recent timestamp
 - Notes the `session` cookie from the request -- this is the `upstream_session`
-- Returns the DBSC JSON session instructions with a fixed session ID of "dbsc_proxy", refresh URL of `/dbsc_proxy/RefreshSession`, credentials of `[{ type: cookie, name: session, attributes: <session cookie attributes>}]`, and a scope from the `DBSC_PROXY_SCOPE` environment variable.
+- Returns the DBSC JSON session instructions with a fixed session ID of `dbsc_proxy`, refresh URL of `/dbsc_proxy/RefreshSession`, credentials of `[{ type: cookie, name: session, attributes: <session cookie attributes>}]`, and a scope from the `DBSC_PROXY_SCOPE` environment variable.
     - Adds a `Set-Cookie: dbsc_proxy=aead({upstream_session, pubkey})` with the expiration (and all other attributes) from the upstream cookie
     - Adds a `Set-Cookie: session=timestamp:hmac(timestamp:<dbsc_proxy cookie value>)` header. Sets the expiration of this cookie to `DBSC_PROXY_REFRESH_INTERVAL`, and all other attributes to the values from the upstream cookie.
 
 ### Requests In A Session
 
 On all requests, if there is a `session` cookie starting with `dbsc_proxy:` and a `dbsc_proxy` cookie, the proxy:
-  - Verifies that the cookie conforms to the format `timestamp:hmac(timestamp:<dbsc_proxy>)`
+  - Verifies that the cookie conforms to the format `<timestamp>:hmac(<timestamp>:<dbsc_proxy>)`
   - Verifies that the HMAC is valid and the timestamp is within 15 minutes
   - Then, decrypts `dbsc_proxy` to get `({ upstream_session, pubkey })`.
   - When sending the request upstream:
