@@ -41,7 +41,7 @@ you turn on a flag in Chrome, or opt-in to an Origin Trial.
 2. Install [go](https://go.dev/). The proxy has been tested with Go 1.25.4.
   You can use [asdf](https://asdf-vm.com/) to install it: `asdf install`.
 
-3. Run the proxy: `DBSC_PROXY_SECRET=sosecret dbsc_proxy="http://localhost:8001" DBSC_PROXY_COOKIE_NAME=sessionid go run ./cmd/proxy`
+3. Run the proxy: `DBSC_PROXY_SECRET=averysecretvaluethatisatleast32characterslong DBSC_PROXY_UPSTREAM="http://localhost:8001" DBSC_PROXY_COOKIE_NAME=sessionid go run ./cmd/proxy`
 
 ## Configuration
 

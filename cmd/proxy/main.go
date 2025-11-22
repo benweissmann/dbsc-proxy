@@ -262,7 +262,10 @@ func setupProxyHandlers(mux *http.ServeMux) {
 }
 
 func main() {
-	config.ParseEnv()
+	err := config.ParseEnv()
+	if err != nil {
+		panic(err)
+	}
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
