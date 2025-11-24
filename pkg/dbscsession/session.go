@@ -22,6 +22,18 @@ type SecureSession struct {
 	upstreamCookie         *http.Cookie
 	pubkey                 *ecdsa.PublicKey
 	sessionCookieTimestamp time.Time
+
+	// The value of the dbsc_proxy cookie send in the request, for sessions created
+	// from a dbsc_proxy cookie / session cookie. We store this in addition to
+	// the decrypted upstreamCookie / pubkey values it contains, so that we can
+	// refresh the session cookie without changing the proxy cookie. Refreshing
+	// the session cookie requires us to re-sign (<timestamp> : <proxy cookie>)
+	// so we need this raw cookie value, and we can't regenerate it by
+	// re-encrypting {upstreamCookie, pubkey} because that will yield a
+	// different value (due to the random nonce). We want to be able to re-issue
+	// the session cookie without touching the proxy cookie to avoid re-sending
+	// a stale Max-Age value for the proxy cookie.
+	incomingProxyCookie *http.Cookie
 }
 
 func CreateForPubkey(pubkey *ecdsa.PublicKey, authorizationString string) (*SecureSession, error) {
@@ -96,6 +108,7 @@ func LoadFromCookies(proxyCookie *http.Cookie, sessionCookie *http.Cookie) (*Sec
 		upstreamCookie:         upstreamCookie,
 		pubkey:                 pubkey,
 		sessionCookieTimestamp: timestamp,
+		incomingProxyCookie:    proxyCookie,
 	}, nil
 }
 
@@ -117,6 +130,7 @@ func Refresh(proxyCookie *http.Cookie, jwtProof string) (*SecureSession, error) 
 		upstreamCookie:         upstreamCookie,
 		pubkey:                 pubkey,
 		sessionCookieTimestamp: dbsctime.Now(),
+		incomingProxyCookie:    proxyCookie,
 	}, nil
 }
 

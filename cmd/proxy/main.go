@@ -246,14 +246,22 @@ func setupProxyHandlers(mux *http.ServeMux) {
 			return
 		}
 
-		proxyCookie, sessionCookie, err := sess.ToCookies()
+		newProxyCookie, sessionCookie, err := sess.ToCookies()
 		if err != nil {
 			slog.Warn("Refresh failed to generate cookies", "err", err)
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 
-		http.SetCookie(w, proxyCookie)
+		if newProxyCookie.Value != proxyCookie.Value {
+			// We should never need to re-issue the proxy cookie; ToCookies() should
+			// use the old value to avoid updating the cookie and potentially modifying
+			// its expiration if it uses Max-Age.
+			slog.Error("Refresh endpoint did not result in unchanged proxy cookie")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
 		http.SetCookie(w, sessionCookie)
 		w.WriteHeader(http.StatusNoContent)
 
