@@ -99,25 +99,36 @@ func LoadFromCookies(proxyCookie *http.Cookie, sessionCookie *http.Cookie) (*Sec
 	}, nil
 }
 
-func Refresh(proxyCookie *http.Cookie, jwtProof string) (*SecureSession, error) {
+// Refreshes the session cookie, given a proxy cookie and a proof-of-possession
+// of the private key. Returns just the new session cookie; the proxy cookie
+// should not be changed for a refresh. Also returns the public key string
+// for logging purposes.
+func Refresh(proxyCookie *http.Cookie, jwtProof string) (*http.Cookie, string, error) {
 	// Decrypt the proxy cookie
 	upstreamCookie, pubkey, err := decryptProxyCookie(proxyCookie)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	// Verify the proof-of-possession
 	err = dbscchallenge.VerifyFromJWT(jwtProof, pubkey)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
-	// Generate a new session with an updated timestamp
-	return &SecureSession{
+	// Generate a new session cookie with an updated timestamp
+	sess := &SecureSession{
 		upstreamCookie:         upstreamCookie,
 		pubkey:                 pubkey,
 		sessionCookieTimestamp: dbsctime.Now(),
-	}, nil
+	}
+
+	pubkeyString, err := sess.PubkeyString()
+	if err != nil {
+		return nil, "", err
+	}
+
+	return sess.buildSessionCookie(proxyCookie), pubkeyString, nil
 }
 
 func (sess *SecureSession) ToCookies() (proxyCookie *http.Cookie, sessionCookie *http.Cookie, err error) {
@@ -155,7 +166,12 @@ func (sess *SecureSession) ToCookies() (proxyCookie *http.Cookie, sessionCookie 
 	}
 
 	// Generate the short-lived session cookie
+	sessionCookie = sess.buildSessionCookie(proxyCookie)
 
+	return
+}
+
+func (sess *SecureSession) buildSessionCookie(proxyCookie *http.Cookie) *http.Cookie {
 	timestampString := strconv.FormatInt(sess.sessionCookieTimestamp.Unix(), 10)
 	toSign := timestampString + ":" + proxyCookie.Value
 	signature := auth.Sum([]byte(toSign), &config.SigningSecret)
@@ -163,7 +179,7 @@ func (sess *SecureSession) ToCookies() (proxyCookie *http.Cookie, sessionCookie 
 
 	sessionCookieAge := dbsctime.Since(sess.sessionCookieTimestamp)
 
-	sessionCookie = &http.Cookie{
+	return &http.Cookie{
 		Name:   config.Global.CookieName,
 		Value:  sessionCookieValue,
 		MaxAge: int(config.Global.RefreshInterval.Seconds() - sessionCookieAge.Seconds()),
@@ -175,8 +191,6 @@ func (sess *SecureSession) ToCookies() (proxyCookie *http.Cookie, sessionCookie 
 		SameSite:    sess.upstreamCookie.SameSite,
 		Partitioned: sess.upstreamCookie.Partitioned,
 	}
-
-	return
 }
 
 func (sess *SecureSession) PubkeyString() (string, error) {
@@ -207,6 +221,7 @@ func (sess *SecureSession) WithNewUpstreamCookie(newCookie *http.Cookie) *Secure
 		upstreamCookie:         newCookie,
 		pubkey:                 sess.pubkey,
 		sessionCookieTimestamp: sess.sessionCookieTimestamp,
+		// Clear incomingProxyCookie; we must issue a new one
 	}
 }
 

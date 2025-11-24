@@ -238,26 +238,24 @@ func setupProxyHandlers(mux *http.ServeMux) {
 			return
 		}
 
-		sess, err := dbscsession.Refresh(proxyCookie, jwt)
+		newSessionCookie, pubkeyString, err := dbscsession.Refresh(proxyCookie, jwt)
 		if err != nil {
 			slog.Warn("Refresh failed", "err", err)
 
+			w.Header().Add("Secure-Session-Challenge", challengeHeaderValue())
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 
-		proxyCookie, sessionCookie, err := sess.ToCookies()
-		if err != nil {
-			slog.Warn("Refresh failed to generate cookies", "err", err)
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-
-		http.SetCookie(w, proxyCookie)
-		http.SetCookie(w, sessionCookie)
+		http.SetCookie(w, newSessionCookie)
 		w.WriteHeader(http.StatusNoContent)
 
-		logRequest("204 No Content", r, nil, "refreshSession")
+		slog.Info("Handled request",
+			"status", http.StatusNoContent,
+			"method", r.Method,
+			"path", r.URL.Path,
+			"dbscPubkey", pubkeyString,
+			"responseAction", "refreshSession")
 	})
 }
 

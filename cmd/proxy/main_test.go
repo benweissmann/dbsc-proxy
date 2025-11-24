@@ -31,30 +31,6 @@ func generateECDSAKey() (*ecdsa.PrivateKey, error) {
 	return ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 }
 
-// createJWT creates a JWT signed with the given key
-func createJWT(key *ecdsa.PrivateKey, challengeHeader string) (string, error) {
-	// parse challenge header
-	re := regexp.MustCompile(`"([^"]+)";id="dbsc_proxy"`)
-	matches := re.FindStringSubmatch(challengeHeader)
-	challenge := matches[1]
-
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key}, nil)
-	if err != nil {
-		return "", err
-	}
-
-	payload := dbscchallenge.ChallengeSolutionPayload{
-		Jti: challenge,
-	}
-
-	token, err := jwt.Signed(signer).Claims(payload).Serialize()
-	if err != nil {
-		return "", err
-	}
-
-	return token, nil
-}
-
 // createJWS creates a JWS with embedded public key for StartSession
 func createJWS(key *ecdsa.PrivateKey, payload *dbscchallenge.ChallengeSolutionPayload) (string, error) {
 	jwk := jose.JSONWebKey{Key: key, Algorithm: string(jose.ES256)}
@@ -80,7 +56,29 @@ func createJWS(key *ecdsa.PrivateKey, payload *dbscchallenge.ChallengeSolutionPa
 	return jws.CompactSerialize()
 }
 
-func requireCookie(t *testing.T, resp *http.Response, name string) *http.Cookie {
+func createJWT(key *ecdsa.PrivateKey, challengeHeader string) (string, error) {
+	re := regexp.MustCompile(`"([^"]+)";id="dbsc_proxy"`)
+	matches := re.FindStringSubmatch(challengeHeader)
+	challenge := matches[1]
+
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key}, nil)
+	if err != nil {
+		return "", err
+	}
+
+	payload := dbscchallenge.ChallengeSolutionPayload{
+		Jti: challenge,
+	}
+
+	token, err := jwt.Signed(signer).Claims(payload).Serialize()
+	if err != nil {
+		return "", err
+	}
+
+	return token, nil
+}
+
+func cookieFromResponse(resp *http.Response, name string) *http.Cookie {
 	var cookie *http.Cookie
 	for _, c := range resp.Cookies() {
 		if c.Name == name {
@@ -88,8 +86,13 @@ func requireCookie(t *testing.T, resp *http.Response, name string) *http.Cookie 
 			break
 		}
 	}
-	require.NotNil(t, cookie, "Expected "+name+"cookie from upstream")
 
+	return cookie
+}
+
+func requireCookie(t *testing.T, resp *http.Response, name string) *http.Cookie {
+	cookie := cookieFromResponse(resp, name)
+	require.NotNil(t, cookie, "Expected "+name+"cookie from upstream")
 	return cookie
 }
 
@@ -359,6 +362,12 @@ func (s *TestSetup) ClearCookie(name string) {
 	})
 }
 
+func (s *TestSetup) SignChallenge(challengeHeader string) string {
+	token, err := createJWT(s.clientPrivateKey, challengeHeader)
+	require.NoError(s.t, err)
+	return token
+}
+
 // TestHappyPath tests the complete DBSC flow
 func TestHappyPath(t *testing.T) {
 	setup := createSetup(t)
@@ -443,17 +452,14 @@ func TestHappyPath(t *testing.T) {
 	challengeHeader = resp.Header.Get("Secure-Session-Challenge")
 	require.NotEmpty(t, challengeHeader, "Expected Secure-Session-Challenge header")
 
-	jwt, err := createJWT(setup.clientPrivateKey, challengeHeader)
-	require.NoError(t, err)
-
 	resp, _ = setup.PostHeaders("/dbsc_proxy/Refresh", map[string]string{
-		"Secure-Session-Response": jwt,
+		"Secure-Session-Response": setup.SignChallenge(challengeHeader),
 	})
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 
 	// Check we got a new session cookie
-	require.NotNil(t, requireCookie(t, resp, "sessionid"), "Expected refreshed session cookie")
-	require.NotNil(t, requireCookie(t, resp, "dbsc_proxy"), "Expected refreshed proxy cookie")
+	requireCookie(t, resp, "sessionid")
+	require.Nil(t, cookieFromResponse(resp, "dbsc_proxy"), "Expected refreshed proxy cookie")
 
 	resp, _ = setup.Get("/api/data")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -610,6 +616,11 @@ func TestRefresh_InvalidJWT(t *testing.T) {
 		"Secure-Session-Response": "invalid.jwt.token",
 	})
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	// Should get a valid challenge back
+	challengeHeader := resp.Header.Get("Secure-Session-Challenge")
+	require.NotEmpty(t, challengeHeader, "Expected Secure-Session-Challenge header")
+	require.NoError(t, dbscchallenge.VerifyFromJWT(setup.SignChallenge(challengeHeader), &setup.clientPrivateKey.PublicKey))
 }
 
 func TestRefresh_WrongKey(t *testing.T) {
@@ -652,6 +663,11 @@ func TestRefresh_WrongKey(t *testing.T) {
 		"Secure-Session-Response": jwt,
 	})
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	// Should get a valid challenge back
+	newChallengeHeader := resp.Header.Get("Secure-Session-Challenge")
+	require.NotEmpty(t, newChallengeHeader, "Expected Secure-Session-Challenge header")
+	require.NoError(t, dbscchallenge.VerifyFromJWT(setup.SignChallenge(newChallengeHeader), &setup.clientPrivateKey.PublicKey))
 }
 
 func TestRefresh_ExpiredChallenge(t *testing.T) {
@@ -693,6 +709,11 @@ func TestRefresh_ExpiredChallenge(t *testing.T) {
 		"Secure-Session-Response": jwt,
 	})
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	// Should get a valid challenge back
+	newChallengeHeader := resp.Header.Get("Secure-Session-Challenge")
+	require.NotEmpty(t, newChallengeHeader, "Expected Secure-Session-Challenge header")
+	require.NoError(t, dbscchallenge.VerifyFromJWT(setup.SignChallenge(newChallengeHeader), &setup.clientPrivateKey.PublicKey))
 }
 
 func TestProxyRequest_NoDBSCSession(t *testing.T) {
