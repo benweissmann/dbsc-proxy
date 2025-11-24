@@ -16,6 +16,7 @@ import (
 
 	"github.com/benweissmann/dbsc-proxy/pkg/config"
 	"github.com/benweissmann/dbsc-proxy/pkg/dbscchallenge"
+	"github.com/benweissmann/dbsc-proxy/pkg/dbsctime"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
@@ -332,19 +333,21 @@ func TestCreateForPubkey(t *testing.T) {
 		SameSite: http.SameSiteStrictMode,
 	}
 
-	before := time.Now()
 	authorization, err := GenerateRegistrationAuthorization(upstreamCookie)
 	require.NoError(t, err)
+
+	now := time.Now().Round(time.Second)
+	dbsctime.Mock(now)
+	defer dbsctime.MockReset()
+
 	session, err := CreateForPubkey(&privKey.PublicKey, authorization)
 	require.NoError(t, err)
-	after := time.Now()
 
 	assert.NotNil(t, session)
 	session.upstreamCookie.Raw = ""
 	assert.Equal(t, upstreamCookie, session.upstreamCookie)
 	assert.Equal(t, &privKey.PublicKey, session.pubkey)
-	assert.True(t, session.sessionCookieTimestamp.After(before) || session.sessionCookieTimestamp.Equal(before))
-	assert.True(t, session.sessionCookieTimestamp.Before(after) || session.sessionCookieTimestamp.Equal(after))
+	assert.Equal(t, session.sessionCookieTimestamp, now)
 }
 
 // Test CreateForPubkey with an invalid authorization string
@@ -713,18 +716,25 @@ func TestRefreshValid(t *testing.T) {
 	require.NoError(t, err)
 
 	// Refresh the session
-	before := time.Now()
-	session, err := Refresh(proxyCookie, token)
-	after := time.Now()
+	now := time.Now().Round(time.Second)
+	dbsctime.Mock(now)
+	defer dbsctime.MockReset()
+
+	newSessionCookie, pubkeyStr, err := Refresh(proxyCookie, token)
+	assert.NoError(t, err)
+
+	session, err := LoadFromCookies(proxyCookie, newSessionCookie)
 
 	assert.NoError(t, err)
-	assert.NotNil(t, session)
 	assert.Equal(t, "session", session.upstreamCookie.Name)
 	assert.Equal(t, "test-value", session.upstreamCookie.Value)
 	assert.Equal(t, privKey.PublicKey.X, session.pubkey.X)
 	assert.Equal(t, privKey.PublicKey.Y, session.pubkey.Y)
-	assert.True(t, session.sessionCookieTimestamp.After(before) || session.sessionCookieTimestamp.Equal(before))
-	assert.True(t, session.sessionCookieTimestamp.Before(after) || session.sessionCookieTimestamp.Equal(after))
+	assert.Equal(t, session.sessionCookieTimestamp, now)
+
+	sessPubkeyStr, err := session.PubkeyString()
+	require.NoError(t, err)
+	assert.Equal(t, pubkeyStr, sessPubkeyStr)
 }
 
 // Test Refresh with invalid proxy cookie
@@ -750,7 +760,7 @@ func TestRefreshInvalidProxyCookie(t *testing.T) {
 	require.NoError(t, err)
 
 	// Refresh should fail
-	_, err = Refresh(proxyCookie, token)
+	_, _, err = Refresh(proxyCookie, token)
 	assert.Error(t, err)
 }
 
@@ -771,7 +781,7 @@ func TestRefreshInvalidJWTProof(t *testing.T) {
 	// Invalid JWT (not actually a JWT)
 	invalidToken := "not.a.jwt"
 
-	_, err = Refresh(proxyCookie, invalidToken)
+	_, _, err = Refresh(proxyCookie, invalidToken)
 	assert.Error(t, err)
 }
 
@@ -803,7 +813,7 @@ func TestRefreshWrongPublicKey(t *testing.T) {
 	require.NoError(t, err)
 
 	// Refresh should fail because JWT is signed with wrong key
-	_, err = Refresh(proxyCookie, token)
+	_, _, err = Refresh(proxyCookie, token)
 	assert.Error(t, err)
 }
 
