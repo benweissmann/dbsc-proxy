@@ -7,7 +7,10 @@
     <h1>Welcome, {{ user.username }}!</h1>
 
     <nav>
-        <a href="{% url 'logout' %}">Log Out</a>
+        <form method="post" action="{% url 'logout' %}">
+            {% csrf_token %}
+            <button type="submit">logout</button>
+        </form>
     </nav>
 
     <h2>Your Note</h2>
