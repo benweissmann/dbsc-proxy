@@ -78,12 +78,13 @@ func createJWT(key *ecdsa.PrivateKey, challengeHeader string) (string, error) {
 	return token, nil
 }
 
-func cookieFromResponse(resp *http.Response, name string) *http.Cookie {
+func cookieFromResponse(t *testing.T, resp *http.Response, name string) *http.Cookie {
 	var cookie *http.Cookie
 	for _, c := range resp.Cookies() {
 		if c.Name == name {
+			// Error if cookie is set twice
+			require.Nil(t, cookie)
 			cookie = c
-			break
 		}
 	}
 
@@ -91,7 +92,7 @@ func cookieFromResponse(resp *http.Response, name string) *http.Cookie {
 }
 
 func requireCookie(t *testing.T, resp *http.Response, name string) *http.Cookie {
-	cookie := cookieFromResponse(resp, name)
+	cookie := cookieFromResponse(t, resp, name)
 	require.NotNil(t, cookie, "Expected "+name+"cookie from upstream")
 	return cookie
 }
@@ -181,6 +182,23 @@ func createMockUpstream() *httptest.Server {
 				SameSite: http.SameSiteStrictMode,
 			})
 			w.Write([]byte("Session updated"))
+
+		case "/api/update-session-with-extra-cookie":
+			// Upstream changes the session cookie AND sets an unrelated cookie
+			http.SetCookie(w, &http.Cookie{
+				Name:     "sessionid",
+				Value:    "new-upstream-session-token-456",
+				Path:     "/",
+				MaxAge:   3600,
+				HttpOnly: true,
+			})
+			http.SetCookie(w, &http.Cookie{
+				Name:   "extra-cookie",
+				Value:  "extra-value-should-be-preserved",
+				Path:   "/",
+				MaxAge: 86400,
+			})
+			w.Write([]byte("Session updated with extra cookie"))
 
 		case "/logout":
 			// Upstream clears the session cookie
@@ -362,6 +380,18 @@ func (s *TestSetup) ClearCookie(name string) {
 	})
 }
 
+func (s *TestSetup) SetCookie(name, value string) {
+	proxyUrl, err := url.Parse(s.proxy.URL)
+	require.NoError(s.t, err)
+
+	s.client.Jar.SetCookies(proxyUrl, []*http.Cookie{
+		{
+			Name:  name,
+			Value: value,
+		},
+	})
+}
+
 func (s *TestSetup) SignChallenge(challengeHeader string) string {
 	token, err := createJWT(s.clientPrivateKey, challengeHeader)
 	require.NoError(s.t, err)
@@ -459,7 +489,7 @@ func TestHappyPath(t *testing.T) {
 
 	// Check we got a new session cookie
 	requireCookie(t, resp, "sessionid")
-	require.Nil(t, cookieFromResponse(resp, "dbsc_proxy"), "Expected refreshed proxy cookie")
+	require.Nil(t, cookieFromResponse(t, resp, "dbsc_proxy"), "Expected refreshed proxy cookie")
 
 	resp, _ = setup.Get("/api/data")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -536,6 +566,187 @@ func TestStartSession_InvalidAuthorization(t *testing.T) {
 	jws, err := createJWS(setup.clientPrivateKey, &dbscchallenge.ChallengeSolutionPayload{
 		Jti:           challenge,
 		Authorization: "invalid-authorization-token",
+	})
+	require.NoError(t, err)
+
+	resp, _ = setup.PostHeaders("/dbsc_proxy/StartSession", map[string]string{
+		"Secure-Session-Response": jws,
+	})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+// TestStartSession_MismatchedUpstreamCookie tests that StartSession rejects a request
+// where the client's session cookie value doesn't match the one bound in the authorization.
+func TestStartSession_MismatchedUpstreamCookie(t *testing.T) {
+	setup := createSetup(t)
+	defer setup.Close()
+
+	dbsctime.Mock(time.Now())
+	defer dbsctime.MockReset()
+
+	// Login to get a registration header
+	resp, _ := setup.Post("/login")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	regHeader := resp.Header.Get("Secure-Session-Registration")
+	challenge := extractChallengeFromHeader(regHeader)
+	authorization := extractAuthorizationFromHeader(regHeader)
+
+	// Tamper with the session cookie in the jar: replace the upstream value with a wrong one
+	setup.SetCookie("sessionid", "wrong-session-value")
+
+	jws, err := createJWS(setup.clientPrivateKey, &dbscchallenge.ChallengeSolutionPayload{
+		Jti:           challenge,
+		Authorization: authorization,
+	})
+	require.NoError(t, err)
+
+	resp, _ = setup.PostHeaders("/dbsc_proxy/StartSession", map[string]string{
+		"Secure-Session-Response": jws,
+	})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+// TestStartSession_MissingUpstreamCookie tests that StartSession rejects a request
+// that has no session cookie at all.
+func TestStartSession_MissingUpstreamCookie(t *testing.T) {
+	setup := createSetup(t)
+	defer setup.Close()
+
+	dbsctime.Mock(time.Now())
+	defer dbsctime.MockReset()
+
+	resp, _ := setup.Post("/login")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	regHeader := resp.Header.Get("Secure-Session-Registration")
+	challenge := extractChallengeFromHeader(regHeader)
+	authorization := extractAuthorizationFromHeader(regHeader)
+
+	// Remove the session cookie from the jar entirely
+	setup.ClearCookie("sessionid")
+
+	jws, err := createJWS(setup.clientPrivateKey, &dbscchallenge.ChallengeSolutionPayload{
+		Jti:           challenge,
+		Authorization: authorization,
+	})
+	require.NoError(t, err)
+
+	resp, _ = setup.PostHeaders("/dbsc_proxy/StartSession", map[string]string{
+		"Secure-Session-Response": jws,
+	})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+// TestStartSession_EmptyUpstreamCookie tests that StartSession rejects a request
+// where the session cookie has an empty value.
+func TestStartSession_EmptyUpstreamCookie(t *testing.T) {
+	setup := createSetup(t)
+	defer setup.Close()
+
+	dbsctime.Mock(time.Now())
+	defer dbsctime.MockReset()
+
+	resp, _ := setup.Post("/login")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	regHeader := resp.Header.Get("Secure-Session-Registration")
+	challenge := extractChallengeFromHeader(regHeader)
+	authorization := extractAuthorizationFromHeader(regHeader)
+
+	// Set the session cookie to an empty value
+	setup.SetCookie("sessionid", "")
+
+	jws, err := createJWS(setup.clientPrivateKey, &dbscchallenge.ChallengeSolutionPayload{
+		Jti:           challenge,
+		Authorization: authorization,
+	})
+	require.NoError(t, err)
+
+	resp, _ = setup.PostHeaders("/dbsc_proxy/StartSession", map[string]string{
+		"Secure-Session-Response": jws,
+	})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+// TestStartSession_MismatchedChallenge tests that StartSession rejects a request where the
+// authorization token was bound to a different challenge than the one in the JWS jti.
+func TestStartSession_MismatchedChallenge(t *testing.T) {
+	setup := createSetup(t)
+	defer setup.Close()
+
+	now := time.Now()
+	dbsctime.Mock(now)
+	defer dbsctime.MockReset()
+
+	// First login: get (challenge1, auth1) where auth1 is bound to challenge1
+	resp, _ := setup.Post("/login")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	regHeader1 := resp.Header.Get("Secure-Session-Registration")
+	challenge1 := extractChallengeFromHeader(regHeader1)
+	auth1 := extractAuthorizationFromHeader(regHeader1)
+
+	// Advance time so the second login generates a different challenge
+	dbsctime.MockAdvance(time.Second)
+
+	// Second login: get (challenge2, auth2) where auth2 is bound to challenge2
+	resp, _ = setup.Post("/login")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	regHeader2 := resp.Header.Get("Secure-Session-Registration")
+	challenge2 := extractChallengeFromHeader(regHeader2)
+	auth2 := extractAuthorizationFromHeader(regHeader2)
+
+	require.NotEqual(t, challenge1, challenge2, "Challenges should differ")
+
+	// Create JWS with jti=challenge1 (valid, recent) but authorization=auth2 (bound to challenge2)
+	jws, err := createJWS(setup.clientPrivateKey, &dbscchallenge.ChallengeSolutionPayload{
+		Jti:           challenge1,
+		Authorization: auth2,
+	})
+	require.NoError(t, err)
+
+	resp, _ = setup.PostHeaders("/dbsc_proxy/StartSession", map[string]string{
+		"Secure-Session-Response": jws,
+	})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	// Also verify auth1 with challenge2 is rejected
+	jws, err = createJWS(setup.clientPrivateKey, &dbscchallenge.ChallengeSolutionPayload{
+		Jti:           challenge2,
+		Authorization: auth1,
+	})
+	require.NoError(t, err)
+
+	resp, _ = setup.PostHeaders("/dbsc_proxy/StartSession", map[string]string{
+		"Secure-Session-Response": jws,
+	})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+// TestStartSession_ExpiredChallenge tests that StartSession rejects a JWS whose
+// challenge timestamp is outside the allowed window.
+func TestStartSession_ExpiredChallenge(t *testing.T) {
+	setup := createSetup(t)
+	defer setup.Close()
+
+	now := time.Now()
+	dbsctime.Mock(now)
+	defer dbsctime.MockReset()
+
+	// Login to get a registration header
+	resp, _ := setup.Post("/login")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	regHeader := resp.Header.Get("Secure-Session-Registration")
+	challenge := extractChallengeFromHeader(regHeader)
+	authorization := extractAuthorizationFromHeader(regHeader)
+
+	// Advance time past the challenge validity window (challenges expire after 1 minute)
+	dbsctime.MockAdvance(time.Second * 61)
+
+	jws, err := createJWS(setup.clientPrivateKey, &dbscchallenge.ChallengeSolutionPayload{
+		Jti:           challenge,
+		Authorization: authorization,
 	})
 	require.NoError(t, err)
 
@@ -950,6 +1161,96 @@ func TestProxyResponse_UpdateUpstreamCookie(t *testing.T) {
 	// Verify new session cookie is used upstream
 	resp, body := setup.Get("/api/data")
 	require.Contains(t, body, "new-upstream-session-token-456")
+}
+
+// TestProxyResponse_UpdateUpstreamCookie_DoesNotLeakSession verifies that when the
+// upstream rotates the session cookie during an active DBSC session, the proxy does not
+// pass the raw new session value back to the client in Set-Cookie headers.
+func TestProxyResponse_UpdateUpstreamCookie_DoesNotLeakSession(t *testing.T) {
+	setup := createSetup(t)
+	defer setup.Close()
+
+	dbsctime.Mock(time.Now())
+	defer dbsctime.MockReset()
+
+	// Complete a full session registration
+	resp, _ := setup.Post("/login")
+	regHeader := resp.Header.Get("Secure-Session-Registration")
+	challenge := extractChallengeFromHeader(regHeader)
+	authorization := extractAuthorizationFromHeader(regHeader)
+
+	jws, err := createJWS(setup.clientPrivateKey, &dbscchallenge.ChallengeSolutionPayload{
+		Jti:           challenge,
+		Authorization: authorization,
+	})
+	require.NoError(t, err)
+
+	resp, _ = setup.PostHeaders("/dbsc_proxy/StartSession", map[string]string{
+		"Secure-Session-Response": jws,
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Trigger upstream session rotation
+	resp, _ = setup.Post("/api/update-session")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Verify no Set-Cookie header exposes the raw upstream session value
+	for _, setCookie := range resp.Header.Values("Set-Cookie") {
+		require.NotContains(t, setCookie, "new-upstream-session-token-456",
+			"Raw upstream session value must not be sent to client")
+	}
+
+	// Verify the DBSC cookies are present
+	requireCookie(t, resp, "dbsc_proxy")
+	require.True(t, strings.HasPrefix(requireCookie(t, resp, "sessionid").Value, "dbsc_proxy:"),
+		"Session cookie should be DBSC-wrapped")
+}
+
+// TestProxyResponse_UpdateUpstreamCookie_PreservesOtherCookies verifies that when the
+// upstream session cookie is suppressed, other unrelated Set-Cookie headers are preserved.
+func TestProxyResponse_UpdateUpstreamCookie_PreservesOtherCookies(t *testing.T) {
+	setup := createSetup(t)
+	defer setup.Close()
+
+	dbsctime.Mock(time.Now())
+	defer dbsctime.MockReset()
+
+	// Complete a full session registration
+	resp, _ := setup.Post("/login")
+	regHeader := resp.Header.Get("Secure-Session-Registration")
+	challenge := extractChallengeFromHeader(regHeader)
+	authorization := extractAuthorizationFromHeader(regHeader)
+
+	jws, err := createJWS(setup.clientPrivateKey, &dbscchallenge.ChallengeSolutionPayload{
+		Jti:           challenge,
+		Authorization: authorization,
+	})
+	require.NoError(t, err)
+
+	resp, _ = setup.PostHeaders("/dbsc_proxy/StartSession", map[string]string{
+		"Secure-Session-Response": jws,
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Trigger upstream session rotation that also sets an unrelated cookie
+	resp, _ = setup.Post("/api/update-session-with-extra-cookie")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// The unrelated cookie must be preserved
+	extraCookie := cookieFromResponse(t, resp, "extra-cookie")
+	require.NotNil(t, extraCookie, "Unrelated cookie should be passed through")
+	require.Equal(t, "extra-value-should-be-preserved", extraCookie.Value)
+
+	// The raw upstream session value must not appear
+	for _, setCookie := range resp.Header.Values("Set-Cookie") {
+		require.NotContains(t, setCookie, "new-upstream-session-token-456",
+			"Raw upstream session value must not be sent to client")
+	}
+
+	// DBSC cookies must be present
+	requireCookie(t, resp, "dbsc_proxy")
+	require.True(t, strings.HasPrefix(requireCookie(t, resp, "sessionid").Value, "dbsc_proxy:"),
+		"Session cookie should be DBSC-wrapped")
 }
 
 func TestProxyResponse_ChallengeHeader(t *testing.T) {

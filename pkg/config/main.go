@@ -38,8 +38,24 @@ type Config struct {
 
 var Global Config
 
-var SigningSecret [32]byte
-var EncryptionSecret [32]byte
+var ChallengeSigningSecret [32]byte
+var SessionCookieSigningSecret [32]byte
+
+var ProxyCookieEncryptionSecret [32]byte
+var RegistrationAuthorizationEncryptionSecret [32]byte
+
+func hkdfDerive(secret []byte, info string) ([32]byte, error) {
+	var out [32]byte
+
+	key, err := hkdf.Key(sha256.New, secret, nil, info, 32)
+	if err != nil {
+		return out, err
+	}
+
+	copy(out[:], key[0:32])
+
+	return out, nil
+}
 
 func ParseEnv() error {
 	err := env.ParseWithOptions(&Global, env.Options{
@@ -92,13 +108,23 @@ func ParseEnv() error {
 		return errors.New("DBSC_PROXY_SECRET must be at least 32 characters long")
 	}
 
-	keys, err := hkdf.Key(sha256.New, []byte(Global.Secret), nil, "", 64)
-	if err != nil {
+	secret := []byte(Global.Secret)
+
+	if ChallengeSigningSecret, err = hkdfDerive(secret, "dbsc-proxy v1 ChallengeSigningSecret"); err != nil {
 		return err
 	}
 
-	copy(EncryptionSecret[:], keys[0:32])
-	copy(SigningSecret[:], keys[32:64])
+	if SessionCookieSigningSecret, err = hkdfDerive(secret, "dbsc-proxy v1 SessionCookieSigningSecret"); err != nil {
+		return err
+	}
+
+	if ProxyCookieEncryptionSecret, err = hkdfDerive(secret, "dbsc-proxy v1 ProxyCookieEncryptionSecret"); err != nil {
+		return err
+	}
+
+	if RegistrationAuthorizationEncryptionSecret, err = hkdfDerive(secret, "dbsc-proxy v1 RegistrationAuthorizationEncryptionSecret"); err != nil {
+		return err
+	}
 
 	return nil
 }

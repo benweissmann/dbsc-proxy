@@ -134,12 +134,13 @@ func setupProxyHandlers(mux *http.ServeMux) {
 				} else if requestSess == nil {
 					// upstream is setting a new session cookie; offer DBSC registration
 					responseAction = "offer-registration"
-					authorization, err := dbscsession.GenerateRegistrationAuthorization(sessionSetCookie)
+					challenge := dbscchallenge.NewChallenge().Sign()
+					authorization, err := dbscsession.GenerateRegistrationAuthorization(sessionSetCookie, challenge)
 					if err == nil {
 						r.Header.Add(
 							"Secure-Session-Registration",
 							`(ES256);challenge="`+
-								dbscchallenge.NewChallenge().Sign()+
+								challenge+
 								`";authorization="`+
 								authorization+
 								`";path="/dbsc_proxy/StartSession"`,
@@ -153,6 +154,21 @@ func setupProxyHandlers(mux *http.ServeMux) {
 						slog.Error("Error generating new session cookie for modified upstream session", "err", err)
 					} else {
 						responseAction = "update-upstream-cookie"
+
+						// We need to filter out the upstream session cookie and
+						// add our proxy cookies
+						setCookies := r.Header.Values("Set-Cookie")
+						r.Header.Del("Set-Cookie")
+
+						for _, setCookie := range setCookies {
+							cookie, err := http.ParseSetCookie(setCookie)
+							if err != nil {
+								slog.Warn("Got invalid upstream set-cookie, passing it on", "err", err)
+								r.Header.Add("Set-Cookie", setCookie)
+							} else if cookie.Name != config.Global.CookieName && cookie.Name != config.ProxyCookieName {
+								r.Header.Add("Set-Cookie", setCookie)
+							}
+						}
 
 						r.Header.Add("Set-Cookie", newProxyCookie.String())
 						r.Header.Add("Set-Cookie", newSessCookie.String())
@@ -187,7 +203,7 @@ func setupProxyHandlers(mux *http.ServeMux) {
 			return
 		}
 
-		pubkey, authorization, err := dbscchallenge.VerifyFromUserProvidedKey(jws)
+		verifiedKey, err := dbscchallenge.VerifyFromUserProvidedKey(jws)
 		if err != nil {
 			slog.Warn("StartSession failed to verify JWS", "err", err)
 
@@ -195,7 +211,15 @@ func setupProxyHandlers(mux *http.ServeMux) {
 			return
 		}
 
-		sess, err := dbscsession.CreateForPubkey(pubkey, authorization)
+		upstreamCookie, err := r.Cookie(config.Global.CookieName)
+		if err != nil {
+			slog.Warn("StartSession without upstream cookie", "err", err)
+
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+
+		sess, err := dbscsession.CreateForPubkey(verifiedKey, upstreamCookie.Value)
 		if err != nil {
 			slog.Warn("StartSession failed to validate authorization", "err", err)
 

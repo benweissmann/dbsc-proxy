@@ -24,20 +24,39 @@ type SecureSession struct {
 	sessionCookieTimestamp time.Time
 }
 
-func CreateForPubkey(pubkey *ecdsa.PublicKey, authorizationString string) (*SecureSession, error) {
-	upstreamCookieBytes, err := DecryptString(authorizationString)
+type registrationAuthorizationData struct {
+	UpstreamCookie string `json:"upstream_session"`
+	Challenge      string `json:"challenge"`
+}
+
+func CreateForPubkey(verifiedUserProvidedKey *dbscchallenge.VerifiedUserProvidedKey, upstreamCookieGivenValue string) (*SecureSession, error) {
+	registrationAuthorizationBytes, err := DecryptString(&config.RegistrationAuthorizationEncryptionSecret, verifiedUserProvidedKey.Authorization)
 	if err != nil {
 		return nil, fmt.Errorf("Invalid authorization string: %w", err)
 	}
 
-	upstreamCookie, err := http.ParseSetCookie(string(upstreamCookieBytes))
+	registrationAuthorizationData := registrationAuthorizationData{}
+	err = json.Unmarshal(registrationAuthorizationBytes, &registrationAuthorizationData)
+	if err != nil {
+		return nil, fmt.Errorf("Invalid authorization data: %w", err)
+	}
+
+	if registrationAuthorizationData.Challenge != verifiedUserProvidedKey.VerifiedChallenge {
+		return nil, fmt.Errorf("Challenge in authorization did not match the provided challenge in registration request")
+	}
+
+	upstreamCookie, err := http.ParseSetCookie(string(registrationAuthorizationData.UpstreamCookie))
 	if err != nil {
 		return nil, fmt.Errorf("Invalid cookie in authorization: %w", err)
 	}
 
+	if upstreamCookie.Value != upstreamCookieGivenValue {
+		return nil, fmt.Errorf("Upstream cookie value in authorization did not match client's provided upstream cookie value")
+	}
+
 	return &SecureSession{
 		upstreamCookie:         upstreamCookie,
-		pubkey:                 pubkey,
+		pubkey:                 verifiedUserProvidedKey.UserProvidedKey,
 		sessionCookieTimestamp: dbsctime.Now(),
 	}, nil
 }
@@ -61,7 +80,7 @@ func LoadFromCookies(proxyCookie *http.Cookie, sessionCookie *http.Cookie) (*Sec
 		return nil, errors.New("Invalid session cookie: bad signature format")
 	}
 
-	ok := auth.Verify(digestBytes, []byte(msg+":"+proxyCookie.Value), &config.SigningSecret)
+	ok := auth.Verify(digestBytes, []byte(msg+":"+proxyCookie.Value), &config.SessionCookieSigningSecret)
 	if !ok {
 		return nil, errors.New("Invalid session cookie: bad signature")
 	}
@@ -147,7 +166,7 @@ func (sess *SecureSession) ToCookies() (proxyCookie *http.Cookie, sessionCookie 
 		return nil, nil, fmt.Errorf("Invalid proxy cookie data: %w", err)
 	}
 
-	proxyCookieEncrypted, err := EncryptToString(proxyCookieData)
+	proxyCookieEncrypted, err := EncryptToString(&config.ProxyCookieEncryptionSecret, proxyCookieData)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Could not encrypt cookie: %w", err)
 	}
@@ -174,7 +193,7 @@ func (sess *SecureSession) ToCookies() (proxyCookie *http.Cookie, sessionCookie 
 func (sess *SecureSession) buildSessionCookie(proxyCookie *http.Cookie) *http.Cookie {
 	timestampString := strconv.FormatInt(sess.sessionCookieTimestamp.Unix(), 10)
 	toSign := timestampString + ":" + proxyCookie.Value
-	signature := auth.Sum([]byte(toSign), &config.SigningSecret)
+	signature := auth.Sum([]byte(toSign), &config.SessionCookieSigningSecret)
 	sessionCookieValue := config.SessionCookiePrefix + timestampString + ":" + base64.URLEncoding.EncodeToString(signature[:])
 
 	sessionCookieAge := dbsctime.Since(sess.sessionCookieTimestamp)
@@ -225,6 +244,16 @@ func (sess *SecureSession) WithNewUpstreamCookie(newCookie *http.Cookie) *Secure
 	}
 }
 
-func GenerateRegistrationAuthorization(upstreamCookie *http.Cookie) (string, error) {
-	return EncryptToString([]byte(upstreamCookie.String()))
+func GenerateRegistrationAuthorization(upstreamCookie *http.Cookie, challenge string) (string, error) {
+	data := &registrationAuthorizationData{
+		UpstreamCookie: upstreamCookie.String(),
+		Challenge:      challenge,
+	}
+
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return "", err
+	}
+
+	return EncryptToString(&config.RegistrationAuthorizationEncryptionSecret, jsonData)
 }

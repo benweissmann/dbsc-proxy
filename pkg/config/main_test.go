@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func reset() {
@@ -43,8 +44,33 @@ func TestParseMinimal(t *testing.T) {
 		RewriteHost:     false,
 	}, Global)
 
-	assert.Equal(t, "7be0f498f06e33026f60478a1bda8ea8880b3381042bf6e62dcae9b5ae7a3639", hex.EncodeToString(EncryptionSecret[:]))
-	assert.Equal(t, "d6a5602426aab6835ff175573656c2cc54b095434e0d99e51cd30cf807bf6004", hex.EncodeToString(SigningSecret[:]))
+	// Verify all 4 keys are stable for a given secret across releases.
+	// These hardcoded values are the expected HKDF outputs for the test secret.
+	// If these values ever change, it would break existing sessions for users.
+	mustDecodeHex := func(s string) [32]byte {
+		b, err := hex.DecodeString(s)
+		require.NoError(t, err)
+		var out [32]byte
+		copy(out[:], b)
+		return out
+	}
+
+	assert.Equal(t,
+		mustDecodeHex("180438f46f236e0d103f09695922b5724e09a806f6e61587c6f82c75c6070a9e"),
+		ChallengeSigningSecret,
+		"ChallengeSigningSecret must be stable across releases")
+	assert.Equal(t,
+		mustDecodeHex("ba89df34d094318502657c92ebff9facbec033bad2dc4ad0fad8f3d65adc27b8"),
+		SessionCookieSigningSecret,
+		"SessionCookieSigningSecret must be stable across releases")
+	assert.Equal(t,
+		mustDecodeHex("06e4288ce2be90faa26ff2c4c96685da143722b6093835386645d60604bed93f"),
+		ProxyCookieEncryptionSecret,
+		"ProxyCookieEncryptionSecret must be stable across releases")
+	assert.Equal(t,
+		mustDecodeHex("071af32486bfaf16f11e5f9922d69b28c161b12292cc52e0fcbdc8d143b3984d"),
+		RegistrationAuthorizationEncryptionSecret,
+		"RegistrationAuthorizationEncryptionSecret must be stable across releases")
 }
 
 func TestParseMaximal(t *testing.T) {
