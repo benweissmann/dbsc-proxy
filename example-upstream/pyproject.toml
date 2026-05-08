@@ -3,13 +3,13 @@ name = "example-upstream"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.14"
 dependencies = [
-    "django>=4.2.26",
+    "django>=6.0.5",
 ]
 
 [dependency-groups]
 dev = [
-    "black>=25.11.0",
+    "black>=26.3.1",
     "flake8>=7.3.0",
 ]
