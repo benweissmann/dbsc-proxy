@@ -10,6 +10,10 @@ jobs:
   python-tests:
     name: Python Tests
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
     defaults:
       run:
         working-directory: ./example-upstream
@@ -41,6 +45,9 @@ jobs:
   go-tests:
     name: Go Tests
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout code
