@@ -33,7 +33,7 @@ func NewChallenge() *DBSCChallenge {
 // only Base64-URL characters and colon, and is safe to use without quoting.
 func (c *DBSCChallenge) Sign() string {
 	msg := strconv.FormatInt(c.timestamp.Unix(), 10)
-	digest := auth.Sum([]byte(msg), &config.SigningSecret)
+	digest := auth.Sum([]byte(msg), &config.ChallengeSigningSecret)
 
 	// Encode digest as base64 to avoid issues with binary data in JSON
 	digestB64 := base64.URLEncoding.EncodeToString(digest[:])
@@ -56,7 +56,7 @@ func verify(data string, maxAge time.Duration) (*DBSCChallenge, error) {
 		return nil, fmt.Errorf("Invalid challenge: bad signature format")
 	}
 
-	ok := auth.Verify(digestBytes, []byte(msg), &config.SigningSecret)
+	ok := auth.Verify(digestBytes, []byte(msg), &config.ChallengeSigningSecret)
 	if !ok {
 		return nil, fmt.Errorf("Invalid challenge: bad signature")
 	}
@@ -113,54 +113,64 @@ func VerifyFromJWT(jwtStr string, pubkey *ecdsa.PublicKey) error {
 	return nil
 }
 
+type VerifiedUserProvidedKey struct {
+	UserProvidedKey   *ecdsa.PublicKey
+	Authorization     string
+	VerifiedChallenge string
+}
+
 // Verifies a challenge from a JWS with a key provided in the header. This
 // should *only* be used when registering a session to bind the session to
 // the given public key; refresh operations must use the bound key and not
 // a user-provided key.
 //
 // If the JWS is valid, signed with an ECDSA key, and contains a valid, recent
-// challenge, then we return the user-provided public key, and the
-// "authorization". field of the JWS. Otherwise, we return an error.
-func VerifyFromUserProvidedKey(jws string) (*ecdsa.PublicKey, string, error) {
+// challenge, then we return the user-provided public key, the
+// "authorization" field of the JWS. Otherwise, we return an error.
+func VerifyFromUserProvidedKey(jws string) (*VerifiedUserProvidedKey, error) {
 	object, err := jose.ParseSigned(jws, []jose.SignatureAlgorithm{jose.ES256})
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 
 	if len(object.Signatures) != 1 {
-		return nil, "", errors.New("JWS contains multiple signatures")
+		return nil, errors.New("JWS contains multiple signatures")
 	}
 
 	jwk := object.Signatures[0].Protected.JSONWebKey
 	if jwk == nil {
-		return nil, "", errors.New("No JWS key")
+		return nil, errors.New("No JWS key")
 	}
 
 	ecdsaKey, typeOK := jwk.Key.(*ecdsa.PublicKey)
 	if !typeOK {
 		// Should never happen -- we specify only ES256 keys above
-		return nil, "", errors.New("Invalid JWS key")
+		return nil, errors.New("Invalid JWS key")
 	}
 
 	payload, err := object.Verify(ecdsaKey)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 
 	parsed := new(ChallengeSolutionPayload)
 	err = json.Unmarshal([]byte(payload), &parsed)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 
 	if parsed.Jti == "" {
-		return nil, "", errors.New("Invalid challenge solution: missing jti")
+		return nil, errors.New("Invalid challenge solution: missing jti")
 	}
 
 	_, err = verify(parsed.Jti, MAX_AGE)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 
-	return ecdsaKey, parsed.Authorization, nil
+	return &VerifiedUserProvidedKey{
+		UserProvidedKey:   ecdsaKey,
+		Authorization:     parsed.Authorization,
+		VerifiedChallenge: parsed.Jti,
+	}, nil
 }

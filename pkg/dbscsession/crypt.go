@@ -16,7 +16,7 @@ import (
 )
 
 // Decrypts a base64-encoded SecretBox appended to its nonce
-func DecryptString(s string) ([]byte, error) {
+func DecryptString(key *[32]byte, s string) ([]byte, error) {
 	decoded, err := base64.URLEncoding.DecodeString(s)
 	if err != nil {
 		return nil, err
@@ -31,7 +31,7 @@ func DecryptString(s string) ([]byte, error) {
 
 	box := decoded[24:]
 
-	value, ok := secretbox.Open(nil, box, &nonce, &config.EncryptionSecret)
+	value, ok := secretbox.Open(nil, box, &nonce, key)
 	if !ok {
 		return nil, errors.New("Invalid encrypted data: bad authentication")
 	}
@@ -40,7 +40,7 @@ func DecryptString(s string) ([]byte, error) {
 }
 
 // Encrypts a value into base64-encoded SecretBox appended to its nonce
-func EncryptToString(data []byte) (string, error) {
+func EncryptToString(key *[32]byte, data []byte) (string, error) {
 	var nonce [24]byte
 	if _, err := io.ReadFull(rand.Reader, nonce[:]); err != nil {
 		return "", fmt.Errorf("Could not generate nonce: %w", err)
@@ -48,7 +48,7 @@ func EncryptToString(data []byte) (string, error) {
 
 	// Encrypt the data and append it to the nonce (decryptProxyCookie expects the
 	// first 24 bytes to be the nonce)
-	proxyCookieBytes := secretbox.Seal(nonce[:], data, &nonce, &config.EncryptionSecret)
+	proxyCookieBytes := secretbox.Seal(nonce[:], data, &nonce, key)
 	return base64.URLEncoding.EncodeToString(proxyCookieBytes), nil
 }
 
@@ -58,7 +58,7 @@ type proxyCookieData struct {
 }
 
 func decryptProxyCookie(proxyCookie *http.Cookie) (upstreamCookie *http.Cookie, pubkey *ecdsa.PublicKey, err error) {
-	proxyCookieValue, err := DecryptString(proxyCookie.Value)
+	proxyCookieValue, err := DecryptString(&config.ProxyCookieEncryptionSecret, proxyCookie.Value)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Invalid proxy cookie: %w", err)
 	}

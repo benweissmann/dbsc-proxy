@@ -131,9 +131,9 @@ Feedback is welcome on this design! Please open an issue if you have any concern
 or suggestions with the design of the proxy.
 
 ### Crypto primitives
-- Let `aead(X)` represent the result of `JSON.stringify(X)`, followed by encryption with Nacl's SecretBox (XSalsa20-Poly1305) using the proxy's secret key.
+- Let `aead(X)` represent the result of `JSON.stringify(X)`, followed by encryption with Nacl's SecretBox (XSalsa20-Poly1305) using the proxy's secret key. We use a different encryption key (derived from a single secret using sha256 HKDF) for each context where encryption is used.
 
-- Let `hmac(Y)` represent a MAC of the string `Y` using Nacl's Auth (HMAC-SHA-512 truncated to 256 bits)
+- Let `hmac(Y)` represent a MAC of the string `Y` using Nacl's Auth (HMAC-SHA-512 truncated to 256 bits). We use a different MAC secret (derived from a single secret using sha256 HKDF) for each context where encryption is used.
 
 ### Session value storage
 
@@ -154,13 +154,15 @@ When the proxy returns a response that contains the header `Set-Cookie: session=
 - If the request did not include a `dbsc_proxy` cookie, this response is establishing a new session.
   - Add a `Secure-Session-Registration` header with challenge `timestamp:hmac(timestamp)` and path `/dbsc_proxy/StartSession`. We support only the `ES256` algorithm since the public keys are shorter.
   - Leave the `Set-Cookie` as-is to support browsers that doesn't support DBSC
-  - We set the `authorization` field of Secure-Session-Registration to `aead(upstream_session)`. We do this instead of relying on the client storing the long-lived cookie as instructed by the passed-through Set-Cookie, so that we
+  - We set the `authorization` field of `Secure-Session-Registration` to `aead({upstream_session, challenge})`. We do this instead of relying on the client storing the long-lived cookie as instructed by the passed-through `Set-Cookie`, so that we
   can access the cookie attributes later during session registration (otherwise, we'd only get the cookie value -- cookies passed from client to server do not include attributes)
 
 The proxy intercepts requests to the `/dbsc_proxy/StartSession` endpoint, and:
 
 - Checks that the provided challenge matches the format `timestamp:hmac(timestamp)` with a valid HMAC and recent timestamp
-- Notes the `session` cookie from the request -- this is the `upstream_session`
+- Decrypts/verifies that the authorization field, and makes sure the `upstream_session` is a cookie whose value matches the `session` cookie from the request, and the `timestamp` matches the challenge timestamp. This check prevents two vulnerabilities:
+  - The timestamp check means that the `authorization` is not a long-lived token that can be used to bind a public key and start a DBSC session
+  - The `upstream_session` cookie value check means that the client must know the value of the `session` cookie. So if an attacker is able to intercept the `Secure-Session-Registration` field of a login request, but can't read the `Set-Cookie` field, they won't be able to initiate a session. This is a particularly important protection for `HttpOnly` cookies, where a Javascript XSS could read the `Secure-Session-Registration` cookie but not an `HttpOnly`-enabled `Set-Cookie` header.
 - Returns the DBSC JSON session instructions with a fixed session ID of `dbsc_proxy`, refresh URL of `/dbsc_proxy/RefreshSession`, credentials of `[{ type: cookie, name: session, attributes: <session cookie attributes>}]`, and a scope from the `DBSC_PROXY_SCOPE` environment variable.
     - Adds a `Set-Cookie: dbsc_proxy=aead({upstream_session, pubkey})` with the expiration (and all other attributes) from the upstream cookie
     - Adds a `Set-Cookie: session=timestamp:hmac(timestamp:<dbsc_proxy cookie value>)` header. Sets the expiration of this cookie to `DBSC_PROXY_REFRESH_INTERVAL`, and all other attributes to the values from the upstream cookie.
@@ -180,6 +182,7 @@ On all requests, if there is a `session` cookie starting with `dbsc_proxy:` and 
     - If the response contains the header `Set-Cookie: session=new_upstream_session`, then the app is updating the upstream session value. The proxy adds:
       - `Set-Cookie: dbsc_proxy=aead({upstream_session: new_upstream_session, pubkey})` with the expiration from the upstream cookie, to update the encrypted long-lived secret
       - `Set-Cookie: session=timestamp:hmac(timestamp:<dbsc_proxy cookie value>)`, with a timestamp and cookie expiration equal to the request's session cookie timestamp and session cookie expiration. Do NOT update timestamp; use the value from the request -- the client has not provided possession of the private key, so we must not bump the timestamp.
+        - This replaces the upstream `Set-Cookie` to avoid leaking the long-lived session.
 
 If there is not a session cookie starting with `dbsc_proxy:`, or there is not a `dbsc_proxy` cookie:
   - Removes any client-provided `dbsc_proxy` cookies and `Dbsc-Proxy-Public-Key` headers.

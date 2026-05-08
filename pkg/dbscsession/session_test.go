@@ -3,6 +3,7 @@ package dbscsession
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -33,11 +34,20 @@ type testProxyCookieData struct {
 
 // setupTestSecrets initializes the global secrets for testing
 func setupTestSecrets() {
-	testSecret := "test-secret-123456789012345678901234567890"
-	h := sha256.New()
-	h.Write([]byte(testSecret))
-	copy(config.SigningSecret[:], h.Sum(nil))
-	copy(config.EncryptionSecret[:], h.Sum(nil))
+	testSecret := []byte("test-secret-123456789012345678901234567890")
+	deriveKey := func(info string) [32]byte {
+		var out [32]byte
+		key, err := hkdf.Key(sha256.New, testSecret, nil, info, 32)
+		if err != nil {
+			panic(err)
+		}
+		copy(out[:], key[:32])
+		return out
+	}
+	config.ChallengeSigningSecret = deriveKey("dbsc-proxy v1 ChallengeSigningSecret")
+	config.SessionCookieSigningSecret = deriveKey("dbsc-proxy v1 SessionCookieSigningSecret")
+	config.ProxyCookieEncryptionSecret = deriveKey("dbsc-proxy v1 ProxyCookieEncryptionSecret")
+	config.RegistrationAuthorizationEncryptionSecret = deriveKey("dbsc-proxy v1 RegistrationAuthorizationEncryptionSecret")
 
 	// Set global config
 	config.Global.CookieName = "session"
@@ -66,7 +76,7 @@ func createValidProxyCookie(t *testing.T, upstreamCookie *http.Cookie, pubkey *e
 	_, err = io.ReadFull(rand.Reader, nonce[:])
 	require.NoError(t, err)
 
-	proxyCookieBytes := secretbox.Seal(nonce[:], proxyCookieData, &nonce, &config.EncryptionSecret)
+	proxyCookieBytes := secretbox.Seal(nonce[:], proxyCookieData, &nonce, &config.ProxyCookieEncryptionSecret)
 
 	return &http.Cookie{
 		Name:  "dbsc_proxy",
@@ -172,7 +182,7 @@ func TestDecryptProxyCookieInvalidJSON(t *testing.T) {
 	_, err := io.ReadFull(rand.Reader, nonce[:])
 	require.NoError(t, err)
 
-	proxyCookieBytes := secretbox.Seal(nonce[:], invalidJSON, &nonce, &config.EncryptionSecret)
+	proxyCookieBytes := secretbox.Seal(nonce[:], invalidJSON, &nonce, &config.ProxyCookieEncryptionSecret)
 
 	proxyCookie := &http.Cookie{
 		Name:  "dbsc_proxy",
@@ -199,7 +209,7 @@ func TestDecryptProxyCookieBlankValues(t *testing.T) {
 	_, err = io.ReadFull(rand.Reader, nonce[:])
 	require.NoError(t, err)
 
-	proxyCookieBytes := secretbox.Seal(nonce[:], proxyCookieData, &nonce, &config.EncryptionSecret)
+	proxyCookieBytes := secretbox.Seal(nonce[:], proxyCookieData, &nonce, &config.ProxyCookieEncryptionSecret)
 
 	proxyCookie := &http.Cookie{
 		Name:  "dbsc_proxy",
@@ -219,7 +229,7 @@ func TestDecryptProxyCookieBlankValues(t *testing.T) {
 	_, err = io.ReadFull(rand.Reader, nonce[:])
 	require.NoError(t, err)
 
-	proxyCookieBytes = secretbox.Seal(nonce[:], proxyCookieData, &nonce, &config.EncryptionSecret)
+	proxyCookieBytes = secretbox.Seal(nonce[:], proxyCookieData, &nonce, &config.ProxyCookieEncryptionSecret)
 
 	proxyCookie = &http.Cookie{
 		Name:  "dbsc_proxy",
@@ -251,7 +261,7 @@ func TestDecryptProxyCookieInvalidUpstreamCookie(t *testing.T) {
 	_, err = io.ReadFull(rand.Reader, nonce[:])
 	require.NoError(t, err)
 
-	proxyCookieBytes := secretbox.Seal(nonce[:], proxyCookieData, &nonce, &config.EncryptionSecret)
+	proxyCookieBytes := secretbox.Seal(nonce[:], proxyCookieData, &nonce, &config.ProxyCookieEncryptionSecret)
 
 	proxyCookie := &http.Cookie{
 		Name:  "dbsc_proxy",
@@ -277,7 +287,7 @@ func TestDecryptProxyCookieInvalidPubkeyBase64(t *testing.T) {
 	_, err = io.ReadFull(rand.Reader, nonce[:])
 	require.NoError(t, err)
 
-	proxyCookieBytes := secretbox.Seal(nonce[:], proxyCookieData, &nonce, &config.EncryptionSecret)
+	proxyCookieBytes := secretbox.Seal(nonce[:], proxyCookieData, &nonce, &config.ProxyCookieEncryptionSecret)
 
 	proxyCookie := &http.Cookie{
 		Name:  "dbsc_proxy",
@@ -303,7 +313,7 @@ func TestDecryptProxyCookieInvalidPubkeyBytes(t *testing.T) {
 	_, err = io.ReadFull(rand.Reader, nonce[:])
 	require.NoError(t, err)
 
-	proxyCookieBytes := secretbox.Seal(nonce[:], proxyCookieData, &nonce, &config.EncryptionSecret)
+	proxyCookieBytes := secretbox.Seal(nonce[:], proxyCookieData, &nonce, &config.ProxyCookieEncryptionSecret)
 
 	proxyCookie := &http.Cookie{
 		Name:  "dbsc_proxy",
@@ -333,14 +343,20 @@ func TestCreateForPubkey(t *testing.T) {
 		SameSite: http.SameSiteStrictMode,
 	}
 
-	authorization, err := GenerateRegistrationAuthorization(upstreamCookie)
+	challenge := dbscchallenge.NewChallenge().Sign()
+	authorization, err := GenerateRegistrationAuthorization(upstreamCookie, challenge)
 	require.NoError(t, err)
 
 	now := time.Now().Round(time.Second)
 	dbsctime.Mock(now)
 	defer dbsctime.MockReset()
 
-	session, err := CreateForPubkey(&privKey.PublicKey, authorization)
+	verifiedKey := &dbscchallenge.VerifiedUserProvidedKey{
+		UserProvidedKey:   &privKey.PublicKey,
+		Authorization:     authorization,
+		VerifiedChallenge: challenge,
+	}
+	session, err := CreateForPubkey(verifiedKey, upstreamCookie.Value)
 	require.NoError(t, err)
 
 	assert.NotNil(t, session)
@@ -358,17 +374,24 @@ func TestCreateForPubkeyInvalidAuthorization(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test with completely invalid base64
-	_, err = CreateForPubkey(&privKey.PublicKey, "not-valid-base64!")
+	verifiedKey := &dbscchallenge.VerifiedUserProvidedKey{
+		UserProvidedKey:   &privKey.PublicKey,
+		Authorization:     "not-valid-base64!",
+		VerifiedChallenge: "some-challenge",
+	}
+	_, err = CreateForPubkey(verifiedKey, "any-value")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Invalid authorization string")
 
 	// Test with valid base64 but invalid encrypted data
-	_, err = CreateForPubkey(&privKey.PublicKey, base64.URLEncoding.EncodeToString([]byte("too short")))
+	verifiedKey.Authorization = base64.URLEncoding.EncodeToString([]byte("too short"))
+	_, err = CreateForPubkey(verifiedKey, "any-value")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Invalid authorization string")
 
 	// Test with empty string
-	_, err = CreateForPubkey(&privKey.PublicKey, "")
+	verifiedKey.Authorization = ""
+	_, err = CreateForPubkey(verifiedKey, "any-value")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Invalid authorization string")
 }
@@ -386,20 +409,91 @@ func TestCreateForPubkeyWrongSecret(t *testing.T) {
 	}
 
 	// Generate authorization with current secret
-	authorization, err := GenerateRegistrationAuthorization(upstreamCookie)
+	challenge := dbscchallenge.NewChallenge().Sign()
+	authorization, err := GenerateRegistrationAuthorization(upstreamCookie, challenge)
 	require.NoError(t, err)
 
-	// Change the secret
-	newSecret := "new-secret-123456789012345678901234567890"
-	h := sha256.New()
-	h.Write([]byte(newSecret))
-	copy(config.SigningSecret[:], h.Sum(nil))
-	copy(config.EncryptionSecret[:], h.Sum(nil))
+	// Change the RegistrationAuthorizationEncryptionSecret to a different key
+	var wrongKey [32]byte
+	copy(wrongKey[:], []byte("wrong-registration-key-for-test!"))
+	config.RegistrationAuthorizationEncryptionSecret = wrongKey
 
 	// Try to decrypt with wrong secret
-	_, err = CreateForPubkey(&privKey.PublicKey, authorization)
+	verifiedKey := &dbscchallenge.VerifiedUserProvidedKey{
+		UserProvidedKey:   &privKey.PublicKey,
+		Authorization:     authorization,
+		VerifiedChallenge: challenge,
+	}
+	_, err = CreateForPubkey(verifiedKey, upstreamCookie.Value)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Invalid authorization string")
+}
+
+// Test CreateForPubkey with a mismatched upstream cookie value
+func TestCreateForPubkeyMismatchedUpstreamCookie(t *testing.T) {
+	setupTestSecrets()
+
+	privKey, err := generateECDSAKey()
+	require.NoError(t, err)
+
+	upstreamCookie := &http.Cookie{
+		Name:  "session",
+		Value: "correct-session-value",
+	}
+
+	challenge := dbscchallenge.NewChallenge().Sign()
+	authorization, err := GenerateRegistrationAuthorization(upstreamCookie, challenge)
+	require.NoError(t, err)
+
+	verifiedKey := &dbscchallenge.VerifiedUserProvidedKey{
+		UserProvidedKey:   &privKey.PublicKey,
+		Authorization:     authorization,
+		VerifiedChallenge: challenge,
+	}
+
+	// Provide a different upstream cookie value than what was stored in the authorization
+	_, err = CreateForPubkey(verifiedKey, "wrong-session-value")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Upstream cookie value in authorization did not match")
+}
+
+// Test CreateForPubkey with a mismatched verified challenge
+func TestCreateForPubkeyMismatchedChallenge(t *testing.T) {
+	setupTestSecrets()
+
+	privKey, err := generateECDSAKey()
+	require.NoError(t, err)
+
+	upstreamCookie := &http.Cookie{
+		Name:  "session",
+		Value: "test-value",
+	}
+
+	// Generate authorization embedding challenge1
+	now := time.Now()
+	dbsctime.Mock(now)
+	defer dbsctime.MockReset()
+
+	challenge1 := dbscchallenge.NewChallenge().Sign()
+	authorization, err := GenerateRegistrationAuthorization(upstreamCookie, challenge1)
+	require.NoError(t, err)
+
+	// Generate a different challenge by advancing the clock
+	dbsctime.Mock(now.Add(time.Second))
+	challenge2 := dbscchallenge.NewChallenge().Sign()
+	require.NotEqual(t, challenge1, challenge2)
+
+	// Build VerifiedUserProvidedKey with challenge2 as the verified challenge,
+	// but the authorization was bound to challenge1
+	verifiedKey := &dbscchallenge.VerifiedUserProvidedKey{
+		UserProvidedKey:   &privKey.PublicKey,
+		Authorization:     authorization,
+		VerifiedChallenge: challenge2,
+	}
+
+	_, err = CreateForPubkey(verifiedKey, upstreamCookie.Value)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Challenge in authorization did not match")
 }
 
 // Test CreateForPubkey with an unparsable cookie
@@ -409,14 +503,78 @@ func TestCreateForPubkeyUnparsableCookie(t *testing.T) {
 	privKey, err := generateECDSAKey()
 	require.NoError(t, err)
 
-	// Encrypt invalid cookie data
-	invalidCookieData := []byte("not a valid Set-Cookie header")
-	authorization, err := EncryptToString(invalidCookieData)
+	// Create an authorization with an invalid Set-Cookie string
+	challenge := dbscchallenge.NewChallenge().Sign()
+	invalidAuthData, err := json.Marshal(map[string]string{
+		"upstream_session": "not a valid Set-Cookie header",
+		"challenge":        challenge,
+	})
 	require.NoError(t, err)
 
-	_, err = CreateForPubkey(&privKey.PublicKey, authorization)
+	authorization, err := EncryptToString(&config.RegistrationAuthorizationEncryptionSecret, invalidAuthData)
+	require.NoError(t, err)
+
+	verifiedKey := &dbscchallenge.VerifiedUserProvidedKey{
+		UserProvidedKey:   &privKey.PublicKey,
+		Authorization:     authorization,
+		VerifiedChallenge: challenge,
+	}
+	_, err = CreateForPubkey(verifiedKey, "any-value")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Invalid cookie in authorization")
+}
+
+// TestGenerateRegistrationAuthorization_ChallengeBinding verifies that two different
+// challenges produce different authorization ciphertext values, ensuring the authorization
+// is cryptographically bound to the specific challenge.
+func TestGenerateRegistrationAuthorization_ChallengeBinding(t *testing.T) {
+	setupTestSecrets()
+
+	upstreamCookie := &http.Cookie{
+		Name:  "session",
+		Value: "test-value",
+	}
+
+	now := time.Now()
+	dbsctime.Mock(now)
+	defer dbsctime.MockReset()
+
+	challenge1 := dbscchallenge.NewChallenge().Sign()
+
+	dbsctime.Mock(now.Add(time.Second))
+	challenge2 := dbscchallenge.NewChallenge().Sign()
+
+	require.NotEqual(t, challenge1, challenge2)
+
+	auth1, err := GenerateRegistrationAuthorization(upstreamCookie, challenge1)
+	require.NoError(t, err)
+
+	auth2, err := GenerateRegistrationAuthorization(upstreamCookie, challenge2)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, auth1, auth2,
+		"Authorization tokens bound to different challenges must be distinct")
+
+	// Verify cross-use is rejected: auth1 with challenge2
+	privKey, err := generateECDSAKey()
+	require.NoError(t, err)
+
+	_, err = CreateForPubkey(&dbscchallenge.VerifiedUserProvidedKey{
+		UserProvidedKey:   &privKey.PublicKey,
+		Authorization:     auth1,
+		VerifiedChallenge: challenge2,
+	}, upstreamCookie.Value)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Challenge in authorization did not match")
+
+	// Verify auth2 with challenge1 is also rejected
+	_, err = CreateForPubkey(&dbscchallenge.VerifiedUserProvidedKey{
+		UserProvidedKey:   &privKey.PublicKey,
+		Authorization:     auth2,
+		VerifiedChallenge: challenge1,
+	}, upstreamCookie.Value)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Challenge in authorization did not match")
 }
 
 // Test LoadFromCookies with valid input
@@ -568,11 +726,10 @@ func TestLoadFromCookiesSignatureFromDifferentSecret(t *testing.T) {
 	proxyCookie, sessionCookie, err := session.ToCookies()
 	require.NoError(t, err)
 
-	// Change the secret
-	differentSecret := "different-secret-key-9876543210-123456"
-	h := sha256.New()
-	h.Write([]byte(differentSecret))
-	copy(config.SigningSecret[:], h.Sum(nil))
+	// Change the SessionCookieSigningSecret to a different key
+	var wrongKey [32]byte
+	copy(wrongKey[:], []byte("different-session-signing-key!!!"))
+	config.SessionCookieSigningSecret = wrongKey
 
 	// Try to load - should fail because signature was created with different secret
 	_, err = LoadFromCookies(proxyCookie, sessionCookie)
@@ -598,7 +755,7 @@ func TestLoadFromCookiesBadTimestampFormat(t *testing.T) {
 
 	// Use non-numeric timestamp
 	msg := "not_a_number"
-	digest := auth.Sum([]byte(msg+":"+proxyCookie.Value), &config.SigningSecret)
+	digest := auth.Sum([]byte(msg+":"+proxyCookie.Value), &config.SessionCookieSigningSecret)
 	digestB64 := base64.URLEncoding.EncodeToString(digest[:])
 
 	sessionCookie := &http.Cookie{
@@ -627,7 +784,7 @@ func TestLoadFromCookiesExpiredSession(t *testing.T) {
 	// Create a timestamp that's too old (beyond refresh interval + slop)
 	oldTimestamp := time.Now().Add(-(config.Global.RefreshInterval + config.SessionCookieEnforcementSlop + time.Minute))
 	msg := strconv.FormatInt(oldTimestamp.Unix(), 10)
-	digest := auth.Sum([]byte(msg+":"+proxyCookie.Value), &config.SigningSecret)
+	digest := auth.Sum([]byte(msg+":"+proxyCookie.Value), &config.SessionCookieSigningSecret)
 	digestB64 := base64.URLEncoding.EncodeToString(digest[:])
 
 	sessionCookie := &http.Cookie{
@@ -656,7 +813,7 @@ func TestLoadFromCookiesFutureTimestamp(t *testing.T) {
 	// Create a timestamp in the future (beyond MAX_AGE from challenge.go)
 	futureTimestamp := time.Now().Add(2 * time.Minute)
 	msg := strconv.FormatInt(futureTimestamp.Unix(), 10)
-	digest := auth.Sum([]byte(msg+":"+proxyCookie.Value), &config.SigningSecret)
+	digest := auth.Sum([]byte(msg+":"+proxyCookie.Value), &config.SessionCookieSigningSecret)
 	digestB64 := base64.URLEncoding.EncodeToString(digest[:])
 
 	sessionCookie := &http.Cookie{
@@ -680,7 +837,7 @@ func TestLoadFromCookiesInvalidProxyCookie(t *testing.T) {
 
 	timestamp := time.Now()
 	msg := strconv.FormatInt(timestamp.Unix(), 10)
-	digest := auth.Sum([]byte(msg+":"+proxyCookie.Value), &config.SigningSecret)
+	digest := auth.Sum([]byte(msg+":"+proxyCookie.Value), &config.SessionCookieSigningSecret)
 	digestB64 := base64.URLEncoding.EncodeToString(digest[:])
 
 	sessionCookie := &http.Cookie{
@@ -940,7 +1097,7 @@ func TestSessionCookieEnforcementSlop(t *testing.T) {
 	// Create a timestamp that's exactly at the refresh interval (should still be valid due to slop)
 	almostExpiredTimestamp := time.Now().Add(-config.Global.RefreshInterval)
 	msg := strconv.FormatInt(almostExpiredTimestamp.Unix(), 10)
-	digest := auth.Sum([]byte(msg+":"+proxyCookie.Value), &config.SigningSecret)
+	digest := auth.Sum([]byte(msg+":"+proxyCookie.Value), &config.SessionCookieSigningSecret)
 	digestB64 := base64.URLEncoding.EncodeToString(digest[:])
 
 	sessionCookie := &http.Cookie{
@@ -1028,7 +1185,7 @@ func TestWrongPublicKeySignature(t *testing.T) {
 
 	timestamp := parts[1]
 	msg := timestamp + ":" + proxyCookie.Value
-	digest := auth.Sum([]byte(msg), &config.SigningSecret)
+	digest := auth.Sum([]byte(msg), &config.SessionCookieSigningSecret)
 	digestB64 := base64.URLEncoding.EncodeToString(digest[:])
 
 	mixedSessionCookie := &http.Cookie{

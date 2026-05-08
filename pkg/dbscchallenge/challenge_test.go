@@ -3,6 +3,7 @@ package dbscchallenge
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -24,11 +25,12 @@ import (
 
 // setupTestSecret initializes the global secret for testing
 func setupTestSecret() {
-	// Use a fixed secret for testing and hash it like config.ParseEnv does
-	testSecret := "test-secret-123456789012345678901234567890"
-	h := sha256.New()
-	h.Write([]byte(testSecret))
-	copy(config.SigningSecret[:], h.Sum(nil))
+	testSecret := []byte("test-secret-123456789012345678901234567890")
+	key, err := hkdf.Key(sha256.New, testSecret, nil, "dbsc-proxy v1 ChallengeSigningSecret", 32)
+	if err != nil {
+		panic(err)
+	}
+	copy(config.ChallengeSigningSecret[:], key[:32])
 }
 
 // generateECDSAKey generates a new ECDSA key pair for testing
@@ -144,10 +146,9 @@ func TestVerifySignatureFromDifferentSecret(t *testing.T) {
 	signed := challenge.Sign()
 
 	// Change the global secret to a different one
-	differentSecret := "different-secret-key-9876543210"
-	h := sha256.New()
-	h.Write([]byte(differentSecret))
-	copy(config.SigningSecret[:], h.Sum(nil))
+	var differentKey [32]byte
+	copy(differentKey[:], []byte("different-challenge-key-for-test!"))
+	config.ChallengeSigningSecret = differentKey
 
 	// The signature should now be invalid because it was signed with the original secret
 	_, err := verify(signed, MAX_AGE)
@@ -171,7 +172,7 @@ func TestVerifyInvalidTimestamp(t *testing.T) {
 
 	// Non-numeric timestamp
 	msg := "123notanumber"
-	digest := auth.Sum([]byte(msg), &config.SigningSecret)
+	digest := auth.Sum([]byte(msg), &config.ChallengeSigningSecret)
 	digestB64 := base64.URLEncoding.EncodeToString(digest[:])
 
 	_, err := verify(msg+":"+digestB64, MAX_AGE)
@@ -477,13 +478,14 @@ func TestVerifyFromUserProvidedKeyValid(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify
-	returnedKey, authorization, err := VerifyFromUserProvidedKey(jws)
+	result, err := VerifyFromUserProvidedKey(jws)
 	assert.NoError(t, err)
-	assert.NotNil(t, returnedKey)
-	assert.Equal(t, elliptic.P256(), returnedKey.Curve)
-	assert.Equal(t, privKey.PublicKey.X, returnedKey.X)
-	assert.Equal(t, privKey.PublicKey.Y, returnedKey.Y)
-	assert.Equal(t, "something", authorization)
+	assert.NotNil(t, result)
+	assert.Equal(t, elliptic.P256(), result.UserProvidedKey.Curve)
+	assert.Equal(t, privKey.PublicKey.X, result.UserProvidedKey.X)
+	assert.Equal(t, privKey.PublicKey.Y, result.UserProvidedKey.Y)
+	assert.Equal(t, "something", result.Authorization)
+	assert.Equal(t, payload.Jti, result.VerifiedChallenge)
 }
 
 func TestVerifyFromUserProvidedKeyValidNoAuthorization(t *testing.T) {
@@ -504,17 +506,17 @@ func TestVerifyFromUserProvidedKeyValidNoAuthorization(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify
-	returnedKey, authorization, err := VerifyFromUserProvidedKey(jws)
+	result, err := VerifyFromUserProvidedKey(jws)
 	assert.NoError(t, err)
-	assert.NotNil(t, returnedKey)
-	assert.Equal(t, "", authorization)
+	assert.NotNil(t, result)
+	assert.Equal(t, "", result.Authorization)
 }
 
 func TestVerifyFromUserProvidedKeyInvalidJWS(t *testing.T) {
 	setupTestSecret()
 
 	// Try with invalid JWS
-	_, _, err := VerifyFromUserProvidedKey("badjws")
+	_, err := VerifyFromUserProvidedKey("badjws")
 	assert.EqualError(t, err, "go-jose/go-jose: compact JWS format must have three parts")
 }
 
@@ -535,7 +537,7 @@ func TestVerifyFromUserProvidedKeyMissingJti(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify
-	_, _, err = VerifyFromUserProvidedKey(jws)
+	_, err = VerifyFromUserProvidedKey(jws)
 	assert.EqualError(t, err, "Invalid challenge solution: missing jti")
 }
 
@@ -590,7 +592,7 @@ func TestVerifyFromUserProvidedKeyBadSignature(t *testing.T) {
 	tamperedJWS := strings.Join(parts, ".")
 
 	// Verify should fail because the signature was created with key1 but header claims key2
-	_, _, err = VerifyFromUserProvidedKey(tamperedJWS)
+	_, err = VerifyFromUserProvidedKey(tamperedJWS)
 	assert.ErrorContains(t, err, "go-jose/go-jose")
 }
 
@@ -611,7 +613,7 @@ func TestVerifyFromUserProvidedKeyInvalidChallenge(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify
-	_, _, err = VerifyFromUserProvidedKey(jws)
+	_, err = VerifyFromUserProvidedKey(jws)
 	assert.EqualError(t, err, "Invalid challenge: bad signature")
 }
 
@@ -636,7 +638,7 @@ func TestVerifyFromUserProvidedKeyExpiredChallenge(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify
-	_, _, err = VerifyFromUserProvidedKey(jws)
+	_, err = VerifyFromUserProvidedKey(jws)
 	assert.EqualError(t, err, "Expired challenge")
 }
 
@@ -682,7 +684,7 @@ func TestVerifyFromUserProvidedKeyMultipleSignatures(t *testing.T) {
 	multiSigJWS := jws.FullSerialize()
 
 	// Verify - should fail due to multiple signatures
-	_, _, err = VerifyFromUserProvidedKey(multiSigJWS)
+	_, err = VerifyFromUserProvidedKey(multiSigJWS)
 	assert.EqualError(t, err, "JWS contains multiple signatures")
 }
 
@@ -709,6 +711,6 @@ func TestVerifyFromUserProvidedKeyInvalidJSON(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify - should fail due to invalid JSON
-	_, _, err = VerifyFromUserProvidedKey(jwsStr)
+	_, err = VerifyFromUserProvidedKey(jwsStr)
 	assert.Error(t, err)
 }
